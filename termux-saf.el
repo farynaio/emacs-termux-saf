@@ -1,114 +1,159 @@
 (require 'json)
 (require 'map)
+(require 'seq)
 
-;; --- Configuration ---
+;; --- 1. Variable Declarations (Fixes void-variable errors) ---
+
 (defcustom termux-saf-root-uri nil
-  "The SAF URI root for your protected folder.
-Set this using M-x set-variable or in your init file.
-Example: \"content://com.android.externalstorage.documents/tree/1234-5678:Documents\""
-  :group 'termux-saf
+  "Root SAF URI to start browsing from."
+  :group 'termux
   :type 'string)
 
 (defcustom termux-saf-temp-dir "~/saf-temp/"
-  "Local directory to store temporary copies of SAF files."
-  :group 'termux-saf
+  "Local directory for temporary file copies."
+  :group 'termux
   :type 'directory)
 
-(setq termux-saf-root-uri "content://com.android.externalstorage.documents/tree/0084-3000%3ABooks/document/0084-3000%3ABooks")
+;; Declare state variables to avoid void-variable errors
+(defvar termux-saf--current-uri nil
+  "Tracks the current SAF URI being browsed.")
+(defvar termux-saf--file-cache nil
+  "Cache of file data for the current buffer to avoid re-parsing.")
 
-;; --- Helper Functions ---
+;; --- 2. Robust Helper Functions ---
 
-(defun termux-saf--exec (command &optional args)
-  "Execute a termux-saf COMMAND with ARGS and return parsed JSON.
-Handles errors where the command returns non-JSON text."
-  (let* ((cmd-args (append (list command) args))
-         (raw-output (shell-command-to-string (mapconcat #'shell-quote-argument cmd-args " ")))
-         (trimmed-output (string-trim raw-output)))
-    (if (string-empty-p trimmed-output)
-        nil
+(defun termux-saf--exec-json (command &rest args)
+  "Execute termux-saf COMMAND and return parsed JSON list.
+Handles empty output and non-JSON error strings gracefully."
+  (let* ((cmd-str (mapconcat #'shell-quote-argument (cons command args) " "))
+         (raw (shell-command-to-string cmd-str))
+         (trim (string-trim raw)))
+    (cond
+     ((string-empty-p trim) nil)
+     ((string-prefix-p "{" trim)
+      ;; If it returns a single object, wrap it in a list
       (condition-case err
-          (json-read-from-string trimmed-output)
-        (error
-         (error "termux-saf command failed (non-JSON output): %s" trimmed-output))))))
+          (list (json-read-from-string trim))
+        (error (error "termux-saf JSON parse error: %s" raw))))
+     ((string-prefix-p "[" trim)
+      ;; Standard list
+      (condition-case err
+          (json-read-from-string trim)
+        (error (error "termux-saf JSON parse error: %s" raw))))
+     (t (error "termux-saf command failed: %s" trim)))))
 
 (defun termux-saf--ensure-temp ()
-  "Ensure the temporary directory exists."
+  "Create temp directory if missing."
   (unless (file-directory-p termux-saf-temp-dir)
     (make-directory termux-saf-temp-dir t)))
 
-;; --- API Functions ---
+;; --- 3. Core API Functions ---
 
 (defun termux-saf-list (uri)
-  "List files in the SAF URI. Returns a list of alists with 'name', 'uri', and 'mime-type'."
-  (if (null uri)
-      (error "termux-saf-root-uri is not set"))
-  (let ((result (termux-saf--exec "termux-saf-ls" (list uri))))
-    ;; Handle case where result is not a list (e.g., single object or error handled above)
-    (if (listp result)
-        result
-      (list result))))
+  "List files in SAF URI. Returns list of alists with 'name', 'uri', 'mime-type'."
+  (unless uri (error "SAF URI is nil"))
+  (let ((raw (termux-saf--exec-json "termux-saf-ls" uri)))
+    ;; Ensure we return a list of records, filtering out any non-file metadata if present
+    (seq-filter (lambda (x) (and (listp x) (alist-get 'name x))) raw)))
 
-(defun termux-saf-get-file (uri &optional filename)
-  "Copy a file from SAF URI to a local temp file.
-Returns the local file path.
-If FILENAME is not provided, generates one based on the URI."
+(defun termux-saf-get-file (uri filename)
+  "Copy file from SAF URI to temp dir using FILENAME.
+Returns the full local path."
   (termux-saf--ensure-temp)
-  (let* ((local-name (or filename (format "saf-file-%d" (random))))
-         (local-path (expand-file-name local-name termux-saf-temp-dir))
-         ;; termux-saf-read usually writes to stdout, so we redirect
+  (let* ((safe-filename (replace-regexp-in-string "[^a-zA-Z0-9._-]" "_" filename))
+         (local-path (expand-file-name safe-filename termux-saf-temp-dir))
          (cmd (format "termux-saf-read '%s' > '%s'" uri local-path)))
-    (message "Copying from SAF to %s..." local-path)
+    (message "Downloading %s..." filename)
     (if (zerop (shell-command cmd))
         (progn
-          (message "File copied successfully.")
+          (message "Downloaded to %s" local-path)
           local-path)
-      (error "Failed to read file from SAF. Check permissions."))))
+      (error "Failed to download file from SAF"))))
 
-(defun termux-saf-write-file (local-path target-dir-uri &optional new-filename)
-  "Write LOCAL-PATH back to the SAF TARGET-DIR-URI.
-Optionally rename the file to NEW-FILENAME.
-Removes the local temp copy after successful upload."
-  (let* ((filename (or new-filename (file-name-nondirectory local-path)))
-         ;; termux-saf-write syntax: termux-saf-write <parent_dir_uri> <filename> < input_file
-         (cmd (format "cat '%s' | termux-saf-write '%s' '%s'"
-                      local-path target-dir-uri filename)))
-    (message "Writing %s back to SAF..." filename)
-    (if (zerop (shell-command cmd))
-        (progn
-          (message "File written to SAF successfully.")
-          (delete-file local-path) ;; Remove temp copy
-          t)
-      (error "Failed to write file to SAF."))))
+(defun termux-saf-open-file (uri filename mime-type)
+  "Download URI to temp, then use 'termux-open' to trigger Android 'Open With'."
+  (let ((local-path (termux-saf-get-file uri filename)))
+    ;; termux-open detects mime type automatically or we can pass -a
+    (let ((cmd (format "termux-open '%s'" local-path)))
+      (shell-command cmd)
+      (message "Opened %s with Android viewer", filename))))
 
-;; --- Convenience Workflow for EXWM/Emacs ---
+;; --- 4. The Browse View (Interactive Buffer) ---
 
-(defun termux-saf-open-and-edit (uri)
-  "Open a file from SAF URI, edit it locally, and prompt to save back.
-Intended for use with EXWM workflows."
+(defvar termux-saf-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") 'termux-saf-open-line)
+    (define-key map (kbd "n") 'next-line)
+    (define-key map (kbd "p") 'previous-line)
+    (define-key map (kbd "g") 'termux-saf-browse-refresh)
+    (define-key map (kbd "q") 'quit-window)
+    map)
+  "Keymap for `termux-saf-mode`.")
+
+(define-derived-mode termux-saf-mode special-mode "Termux-SAF"
+  "Major mode for browsing Termux SAF directories."
+  (setq-local revert-buffer-function #'termux-saf-browse-refresh)
+  (setq-local termux-saf--current-uri nil))
+
+(defun termux-saf-browse (uri)
+  "Create a clickable buffer listing files in SAF URI."
   (interactive "sEnter SAF URI: ")
-  (let* ((local-file (termux-saf-get-file uri))
-         (buffer (find-file local-file)))
-    (with-current-buffer buffer
-      (setq-local termux-saf--original-uri uri)
-      (setq-local termux-saf--target-dir (file-name-directory local-file)) ;; Logic to extract dir URI needed if different
-      (add-hook 'kill-buffer-hook #'termux-saf--prompt-save-back nil t))))
+  (let ((buffer-name (format "*SAF: %s*" (if (stringp uri) (substring uri (max 0 (- (length uri) 20))) "Root"))))
+    (with-current-buffer (get-buffer-create buffer-name)
+      (termux-saf-mode)
+      (setq-local termux-saf--current-uri uri)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "Termux SAF Browser\n")
+        (insert (format "Current: %s\n\n" uri))
+        (insert "Name\t\t\t\tSize\t\tMIME\n")
+        (insert "--------------------------------------------------\n")
 
-(defun termux-saf--prompt-save-back ()
-  "Hook function to prompt saving back to SAF when buffer is killed."
-  (when (and (boundp 'termux-saf--original-uri) termux-saf--original-uri)
-    (when (y-or-n-p (format "Save changes back to SAF for %s? " (buffer-file-name)))
-      (let* ((uri termux-saf--original-uri)
-             ;; Extract parent URI logic is complex; assuming user saves to same folder
-             ;; In a real scenario, you might need to store the parent-dir-uri separately
-             (parent-uri (read-string "Enter Parent Directory SAF URI: "
-                                      (file-name-directory uri)))
-             (filename (file-name-nondirectory (buffer-file-name))))
-        (termux-saf-write-file (buffer-file-name) parent-uri filename)))))
+        (let ((files (termux-saf-list uri)))
+          (setq-local termux-saf--file-cache files) ;; Cache for quick access
+          (if (null files)
+              (insert "(Directory empty or error reading)\n")
+            (dolist (file files)
+              (let* ((name (alist-get 'name file))
+                     (size (or (alist-get 'length file) "?"))
+                     (mime (or (alist-get 'type file) "application/octet-stream"))
+                     (file-uri (alist-get 'uri file)))
+                ;; Insert as a clickable text property
+                (let ((start (point)))
+                  (insert (format "%-30s\t%s\t%s\n" name size mime))
+                  (let ((end (point)))
+                    (add-text-properties
+                     start end
+                     `(mouse-face highlight
+                       face link
+                       pointer hand
+                       termux-saf-uri ,file-uri
+                       termux-saf-name ,name
+                       termux-saf-mime ,mime)))))))))
+      (goto-char (point-min))
+      (forward-line 4) ;; Skip header
+      (display-buffer (current-buffer)))))
 
-;; --- Usage Example ---
-;; 1. Set your root URI:
-;;    M-x set-variable RET termux-saf-root-uri RET "content://..."
-;; 2. List files:
-;;    (termux-saf-list termux-saf-root-uri)
-;; 3. Get a specific file (you need the file's specific URI from the list):
-;;    (termux-saf-get-file "content://.../file.pdf")
+(defun termux-saf-browse-refresh (&optional ignore-auto noconfirm)
+  "Refresh the current SAF buffer."
+  (interactive)
+  (let ((uri termux-saf--current-uri))
+    (if uri
+        (termux-saf-browse uri)
+      (message "No URI to refresh"))))
+
+(defun termux-saf-open-line ()
+  "Open the file on the current line using Android 'Open With'."
+  (interactive)
+  (let* ((props (text-properties-at (point)))
+         (uri (plist-get props 'termux-saf-uri))
+         (name (plist-get props 'termux-saf-name))
+         (mime (plist-get props 'termux-saf-mime)))
+    (if uri
+        (termux-saf-open-file uri name mime)
+      (message "No file on this line"))))
+
+;; --- Usage ---
+;; 1. Set your root URI: M-x set-variable RET termux-saf-root-uri RET "content://..."
+;; 2. Run: M-x termux-saf-browse RET (or just evaluate (termux-saf-browse termux-saf-root-uri))
+;; 3. Click a line or press RET to open the file with Android's picker.
