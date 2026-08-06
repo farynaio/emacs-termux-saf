@@ -6,12 +6,12 @@ Default folder isolation model in modern Android is great, but often times, it's
 
 ## Dependencies
 
-- [f lib](https://github.com/rejeep/f.el)
+- [f](https://github.com/rejeep/f.el)
 - [openwith](https://github.com/jpkotta/openwith)
 - [Termux](https://termux.dev/en/)
 
 ## Usage
 
-1. request and grant access to protected folder using `termux-saf-managedir`
-2. call `termux-saf-browse` giving it folder uri from previous step as parameter
+1. request and grant access to protected folder using `termux-saf-managedir` in Termux terminal
+2. in Emacs, call `termux-saf-browse` giving it folder URI from previous step as a parameter
 3. view the content of protected folder, click on file name to open using openwith
