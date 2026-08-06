@@ -4,30 +4,15 @@
 (require 'f)
 (require 'openwith)
 
-;; (require 'cl-lib)
-;; (cl-defstruct (my-item (:constructor my-item-create)) name uri size)
-
-(setq termux-saf-root-uri "content://com.android.externalstorage.documents/tree/0084-3000%3ABooks")
-
-
-;; (let ((item (my-item-create :name "Test" :uri :size 50))) (my-item-name item)) ;; Fast vector access
-
-
-
 ;; --- 1. Variable Declarations (Fixes void-variable errors) ---
 
-(defcustom termux-saf-root-uri nil
-  "Root SAF URI to start browsing from."
-  :group 'termux-saf
-  :type 'string)
-
-(defcustom termux-saf-cache-dir "~/saf-cache/"
+(defcustom termux-saf-cache-dir "~/.emacs.d/saf-cache/"
   "Local directory for temporary file copies."
   :group 'termux-saf
   :type 'directory)
 
 
-(defcustom termux-saf-temp-dir "~/saf-temp/"
+(defcustom termux-saf-temp-dir "~/.emacs.d/saf-temp/"
   "Local directory for temporary file copies."
   :group 'termux-saf
   :type 'directory)
@@ -65,9 +50,13 @@ Handles empty output and non-JSON error strings gracefully."
   (unless (file-directory-p termux-saf-temp-dir)
     (make-directory termux-saf-temp-dir t)))
 
+(defun termux-saf--ensure-cache ()
+  "Create cache directory if missing."
+  (unless (file-directory-p termux-saf-cache-dir)
+    (make-directory termux-saf-cache-dir t)))
+
 (defun termux-saf--write-cache (data cache-file-path)
-  (when (not (file-directory-p termux-saf-cache-dir))
-    (mkdir termux-saf-cache-dir t))
+  (termux-saf--ensure-cache)
   (f-write-text (json-encode data) 'utf-8 cache-file-path))
 
 ;; --- 3. Core API Functions ---
@@ -83,13 +72,6 @@ Handles empty output and non-JSON error strings gracefully."
     (unless (file-exists-p cache-file-path)
       (termux-saf--write-cache data cache-file-path))
     data))
-
-;; (defun termux-saf-list (uri)
-;;   "List files in SAF URI. Returns list of alists with 'name', 'uri', 'mime-type'."
-;;   (unless uri (error "SAF URI is nil"))
-;;   (let ((raw (termux-saf--exec-json "termux-saf-ls" uri)))
-;;     ;; Ensure we return a list of records, filtering out any non-file metadata if present
-    ;; (seq-filter (lambda (x) (and (listp x) (alist-get 'name x))) raw)))
 
 (defun termux-saf-get-file (uri filename)
   "Copy file from SAF URI to temp dir using FILENAME.
@@ -110,12 +92,6 @@ Returns the full local path."
   (let ((local-path (termux-saf-get-file uri filename))
          (openwith-mode t))
     (find-file local-path)))
-    ;; termux-open detects mime type automatically or we can pass -a
-    ;; (if (fboundp 'openwith-file-handler)
-      ;; (openwith-file-handler local-path)
-    ;; (let ((cmd (format "termux-open '%s'" local-path)))
-      ;; (shell-command cmd)
-      ;; (message "Opened %s with Android viewer", filename)))))
 
 ;; --- 4. The Browse View (Interactive Buffer) ---
 
@@ -150,22 +126,21 @@ Returns the full local path."
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert "Termux SAF Browser\n")
-        (insert (format "Current: %s\n\n" uri))
-        (insert "Name\n")
+        (insert (format "Content: %s\n\n" uri))
         (insert "--------------------------------------------------\n")
 
-        (let ((files (termux-saf-list )))
-          ;; (message files)
-          ;; (setq-local termux-saf--file-cache files) ;; Cache for quick access
+        (let ((files (termux-saf-list uri))
+               (index 0))
           (if (null files)
               (insert "(Directory empty or error reading)\n")
             (dolist (file files)
               (let* ((name (alist-get 'name file))
                      (mime (or (alist-get 'type file) "application/octet-stream"))
                      (file-uri (alist-get 'uri file)))
+                (setq index (1+ index))
                 ;; Insert as a clickable text property
                 (let ((start (point)))
-                  (insert (format "%-30s\n" name))
+                  (insert (format "%s.\t%s\n" index name))
                   (let ((end (point)))
                     (add-text-properties
                      start end
@@ -196,8 +171,3 @@ Returns the full local path."
     (if uri
         (termux-saf-open-file uri name mime)
       (message "No file on this line"))))
-
-;; --- Usage ---
-;; 1. Set your root URI: M-x set-variable RET termux-saf-root-uri RET "content://..."
-;; 2. Run: M-x termux-saf-browse RET (or just evaluate (termux-saf-browse termux-saf-root-uri))
-;; 3. Click a line or press RET to open the file with Android's picker.
