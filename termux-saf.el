@@ -1,17 +1,35 @@
 (require 'json)
 (require 'map)
 (require 'seq)
+(require 'f)
+(require 'openwith)
+
+;; (require 'cl-lib)
+;; (cl-defstruct (my-item (:constructor my-item-create)) name uri size)
+
+(setq termux-saf-root-uri "content://com.android.externalstorage.documents/tree/0084-3000%3ABooks")
+
+
+;; (let ((item (my-item-create :name "Test" :uri :size 50))) (my-item-name item)) ;; Fast vector access
+
+
 
 ;; --- 1. Variable Declarations (Fixes void-variable errors) ---
 
 (defcustom termux-saf-root-uri nil
   "Root SAF URI to start browsing from."
-  :group 'termux
+  :group 'termux-saf
   :type 'string)
+
+(defcustom termux-saf-cache-dir "~/saf-cache/"
+  "Local directory for temporary file copies."
+  :group 'termux-saf
+  :type 'directory)
+
 
 (defcustom termux-saf-temp-dir "~/saf-temp/"
   "Local directory for temporary file copies."
-  :group 'termux
+  :group 'termux-saf
   :type 'directory)
 
 ;; Declare state variables to avoid void-variable errors
@@ -47,14 +65,31 @@ Handles empty output and non-JSON error strings gracefully."
   (unless (file-directory-p termux-saf-temp-dir)
     (make-directory termux-saf-temp-dir t)))
 
+(defun termux-saf--write-cache (data cache-file-path)
+  (when (not (file-directory-p termux-saf-cache-dir))
+    (mkdir termux-saf-cache-dir t))
+  (f-write-text (json-encode data) 'utf-8 cache-file-path))
+
 ;; --- 3. Core API Functions ---
 
 (defun termux-saf-list (uri)
-  "List files in SAF URI. Returns list of alists with 'name', 'uri', 'mime-type'."
+  "Lazy list files in SAF URI. Returns list of alists with 'name', 'uri', 'type', 'length', 'last_modified'."
   (unless uri (error "SAF URI is nil"))
-  (let ((raw (termux-saf--exec-json "termux-saf-ls" uri)))
-    ;; Ensure we return a list of records, filtering out any non-file metadata if present
-    (seq-filter (lambda (x) (and (listp x) (alist-get 'name x))) raw)))
+  (let* ((cache-name (concat (base64-encode-string uri) ".json"))
+          (cache-file-path (expand-file-name cache-name termux-saf-cache-dir))
+          (raw (if (file-exists-p cache-file-path) (json-read-file cache-file-path) (termux-saf--exec-json "termux-saf-ls" uri)))
+          ;; Ensure we return a list of records, filtering out any non-file metadata if present.
+          (data (seq-filter (lambda (x) (and (listp x) (alist-get 'name x))) raw)))
+    (unless (file-exists-p cache-file-path)
+      (termux-saf--write-cache data cache-file-path))
+    data))
+
+;; (defun termux-saf-list (uri)
+;;   "List files in SAF URI. Returns list of alists with 'name', 'uri', 'mime-type'."
+;;   (unless uri (error "SAF URI is nil"))
+;;   (let ((raw (termux-saf--exec-json "termux-saf-ls" uri)))
+;;     ;; Ensure we return a list of records, filtering out any non-file metadata if present
+    ;; (seq-filter (lambda (x) (and (listp x) (alist-get 'name x))) raw)))
 
 (defun termux-saf-get-file (uri filename)
   "Copy file from SAF URI to temp dir using FILENAME.
@@ -72,11 +107,15 @@ Returns the full local path."
 
 (defun termux-saf-open-file (uri filename mime-type)
   "Download URI to temp, then use 'termux-open' to trigger Android 'Open With'."
-  (let ((local-path (termux-saf-get-file uri filename)))
+  (let ((local-path (termux-saf-get-file uri filename))
+         (openwith-mode t))
+    (find-file local-path)))
     ;; termux-open detects mime type automatically or we can pass -a
-    (let ((cmd (format "termux-open '%s'" local-path)))
-      (shell-command cmd)
-      (message "Opened %s with Android viewer", filename))))
+    ;; (if (fboundp 'openwith-file-handler)
+      ;; (openwith-file-handler local-path)
+    ;; (let ((cmd (format "termux-open '%s'" local-path)))
+      ;; (shell-command cmd)
+      ;; (message "Opened %s with Android viewer", filename)))))
 
 ;; --- 4. The Browse View (Interactive Buffer) ---
 
@@ -95,6 +134,12 @@ Returns the full local path."
   (setq-local revert-buffer-function #'termux-saf-browse-refresh)
   (setq-local termux-saf--current-uri nil))
 
+(defun termux-saf-cache-clear ()
+  "Delete all cached content, by deleting and recreating cache folder."
+  (interactive)
+  (delete-directory termux-saf-cache-dir t)
+  (mkdir termux-saf-cache-dir t))
+
 (defun termux-saf-browse (uri)
   "Create a clickable buffer listing files in SAF URI."
   (interactive "sEnter SAF URI: ")
@@ -106,21 +151,21 @@ Returns the full local path."
         (erase-buffer)
         (insert "Termux SAF Browser\n")
         (insert (format "Current: %s\n\n" uri))
-        (insert "Name\t\t\t\tSize\t\tMIME\n")
+        (insert "Name\n")
         (insert "--------------------------------------------------\n")
 
-        (let ((files (termux-saf-list uri)))
-          (setq-local termux-saf--file-cache files) ;; Cache for quick access
+        (let ((files (termux-saf-list )))
+          ;; (message files)
+          ;; (setq-local termux-saf--file-cache files) ;; Cache for quick access
           (if (null files)
               (insert "(Directory empty or error reading)\n")
             (dolist (file files)
               (let* ((name (alist-get 'name file))
-                     (size (or (alist-get 'length file) "?"))
                      (mime (or (alist-get 'type file) "application/octet-stream"))
                      (file-uri (alist-get 'uri file)))
                 ;; Insert as a clickable text property
                 (let ((start (point)))
-                  (insert (format "%-30s\t%s\t%s\n" name size mime))
+                  (insert (format "%-30s\n" name))
                   (let ((end (point)))
                     (add-text-properties
                      start end
@@ -128,8 +173,7 @@ Returns the full local path."
                        face link
                        pointer hand
                        termux-saf-uri ,file-uri
-                       termux-saf-name ,name
-                       termux-saf-mime ,mime)))))))))
+                       termux-saf-name ,name)))))))))
       (goto-char (point-min))
       (forward-line 4) ;; Skip header
       (display-buffer (current-buffer)))))
