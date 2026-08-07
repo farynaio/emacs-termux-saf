@@ -12,7 +12,7 @@
   :type 'directory)
 
 
-(defcustom termux-saf-temp-dir "~/.emacs.d/saf-temp/"
+(defcustom termux-saf-tmp-dir "~/.emacs.d/saf-tmp/"
   "Local directory for temporary file copies."
   :group 'termux-saf
   :type 'directory)
@@ -45,10 +45,10 @@ Handles empty output and non-JSON error strings gracefully."
         (error (error "termux-saf JSON parse error: %s" raw))))
      (t (error "termux-saf command failed: %s" trim)))))
 
-(defun termux-saf--ensure-temp ()
-  "Create temp directory if missing."
-  (unless (file-directory-p termux-saf-temp-dir)
-    (make-directory termux-saf-temp-dir t)))
+(defun termux-saf--ensure-tmp ()
+  "Create tmp directory if missing."
+  (unless (file-directory-p termux-saf-tmp-dir)
+    (make-directory termux-saf-tmp-dir t)))
 
 (defun termux-saf--ensure-cache ()
   "Create cache directory if missing."
@@ -74,11 +74,11 @@ Handles empty output and non-JSON error strings gracefully."
     data))
 
 (defun termux-saf-get-file (uri filename)
-  "Copy file from SAF URI to temp dir using FILENAME.
+  "Copy file from SAF URI to SAF tmp dir using FILENAME.
 Returns the full local path."
-  (termux-saf--ensure-temp)
+  (termux-saf--ensure-tmp)
   (let* ((safe-filename (replace-regexp-in-string "[^a-zA-Z0-9._-]" "_" filename))
-         (local-path (expand-file-name safe-filename termux-saf-temp-dir))
+         (local-path (expand-file-name safe-filename termux-saf-tmp-dir))
          (cmd (format "termux-saf-read '%s' > '%s'" uri local-path)))
     (message "Downloading %s..." filename)
     (if (zerop (shell-command cmd))
@@ -88,7 +88,7 @@ Returns the full local path."
       (error "Failed to download file from SAF"))))
 
 (defun termux-saf-open-file (uri filename mime-type)
-  "Download URI to temp, then use 'termux-open' to trigger Android 'Open With'."
+  "Download URI to SAF tmp, then use 'openwith'."
   (let ((local-path (termux-saf-get-file uri filename))
          (openwith-mode t))
     (find-file local-path)))
